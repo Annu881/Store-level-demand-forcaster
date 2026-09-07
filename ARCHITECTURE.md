@@ -8,12 +8,12 @@ The HLD illustrates the end-to-end workflow covering offline model training and 
 
 ```mermaid
 flowchart TB
-    subgraph Data Sources
+    subgraph Data_Sources ["Data Sources"]
         M5_CSV[(M5 CSV Files\nSales, Calendar, Prices)]
         External_POS[(Future POS / ERP\nFor Extension)]
     end
 
-    subgraph Offline Training Pipeline
+    subgraph Offline_Training_Pipeline ["Offline Training Pipeline"]
         DI[Data Ingestion & Validation]
         Transform[Wide-to-Long Transformation]
         FE[Feature Engineering\nCalendar, Lags, Price]
@@ -31,7 +31,7 @@ flowchart TB
         Eval --> Registry
     end
 
-    subgraph Serving & API Layer (Online)
+    subgraph Serving_API_Layer ["Serving & API Layer (Online)"]
         API[FastAPI Endpoints]
         Inference[Forecast Service & Model Inference]
         Sim[Replenishment Simulator]
@@ -44,7 +44,7 @@ flowchart TB
         Sim --> DB
     end
 
-    subgraph User Interface
+    subgraph User_Interface ["User Interface"]
         Streamlit[Streamlit Dashboard\nForecast Explorer, Simulator, Analytics]
     end
 
@@ -65,7 +65,7 @@ flowchart LR
     CalMerge --> PriceMerge[Merge Sell Prices]
     PriceMerge --> FeatureEng
     
-    subgraph Feature Engineering
+    subgraph Feature_Engineering ["Feature Engineering"]
         direction TB
         CalFeat(Calendar: known events, SNAP)
         HistFeat(Lags 1/7/14/28, Rolling means)
