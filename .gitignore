@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data directories (only keep samples/gitkeep if any)
+data/raw/*
+data/processed/*
+data/quality_reports/*
+data/artifacts/*
+!data/**/.gitkeep
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Virtual environment utilities
+.idea/
+.vscode/
+
+# Build and testing
+.pytest_cache/
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+*.log

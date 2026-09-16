@@ -1,0 +1,12 @@
+pytest
+fastapi
+uvicorn
+streamlit
+pandas
+numpy
+scikit-learn
+lightgbm
+pyarrow
+pydantic
+mlflow
+evidently
