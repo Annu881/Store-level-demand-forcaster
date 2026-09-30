@@ -6,7 +6,7 @@ import pickle
 import os
 import gc
 
-def load_and_transform_data(raw_dir='../../data/raw'):
+def load_and_transform_data(raw_dir='../data/raw'):
     print("Loading datasets...")
     try:
         sales = pd.read_csv(f'{raw_dir}/sales_train_validation.csv')
