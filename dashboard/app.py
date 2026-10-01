@@ -290,7 +290,12 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📈  Forecast Explorer", "📊  Model Performance", "❤️  System Health"])
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.replenishment.simulator import simulate_replenishment
+
+tab1, tab2, tab3, tab4 = st.tabs(["📈  Forecast Explorer", "📦  Replenishment Sim", "📊  Model Performance", "❤️  System Health"])
 
 # ──────────────────────── TAB 1: FORECAST EXPLORER ───────────────────────────
 with tab1:
@@ -304,6 +309,9 @@ with tab1:
                     data = resp.json()
                     df = pd.DataFrame(data["forecasts"])
                     df["forecast_date"] = pd.to_datetime(df["forecast_date"])
+
+                    # Store forecast for Tab 2
+                    st.session_state["latest_forecast"] = df["point_forecast"].tolist()
 
                     total  = df["point_forecast"].sum()
                     avg    = df["point_forecast"].mean()
@@ -381,8 +389,70 @@ with tab1:
             </div>
         </div>""", unsafe_allow_html=True)
 
-# ──────────────────────── TAB 2: MODEL PERFORMANCE ───────────────────────────
+# ──────────────────────── TAB 2: REPLENISHMENT SIM ───────────────────────────
 with tab2:
+    st.markdown('<div class="section-tag">INVENTORY SIMULATION</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Smart Replenishment Logic</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-desc">Adjust operating parameters below to see how inventory KPIs change based on the LightGBM forecast.</div>', unsafe_allow_html=True)
+
+    if "latest_forecast" not in st.session_state:
+        st.info("👈 Please Generate a forecast in Tab 1 first!")
+    else:
+        fcst_list = st.session_state["latest_forecast"]
+        
+        c1, c2, c3 = st.columns(3)
+        current_stock = c1.number_input("📦 Current On-Hand Stock", min_value=0, value=50, step=10)
+        lead_time = c2.number_input("🚚 Supplier Lead Time (Days)", min_value=1, value=7, step=1)
+        service_lvl_str = c3.selectbox("🎯 Target Service Level", ["90%", "95%", "98%", "99%"], index=1)
+        
+        service_lvl = float(service_lvl_str.strip("%")) / 100.0
+        
+        res = simulate_replenishment(fcst_list, current_stock, lead_time, service_lvl)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
+        
+        col1.markdown(f"""
+        <div class="kpi-card" style="border-left: 4px solid #F59E0B;">
+            <div class="kpi-label">Reorder Point</div>
+            <div class="kpi-value">{res['reorder_point']} <span style="font-size:14px;">units</span></div>
+            <div class="kpi-sub">Trigger order when stock hits this level</div>
+        </div>""", unsafe_allow_html=True)
+
+        col2.markdown(f"""
+        <div class="kpi-card" style="border-left: 4px solid #10B981;">
+            <div class="kpi-label">Safety Stock</div>
+            <div class="kpi-value">{res['safety_stock']} <span style="font-size:14px;">units</span></div>
+            <div class="kpi-sub">Buffer for {service_lvl_str} service level</div>
+        </div>""", unsafe_allow_html=True)
+
+        col3.markdown(f"""
+        <div class="kpi-card" style="border-left: 4px solid #38BDF8;">
+            <div class="kpi-label">Suggested Order Qty</div>
+            <div class="kpi-value">{res['suggested_order_qty']} <span style="font-size:14px;">units</span></div>
+            <div class="kpi-sub">Order amount needed today</div>
+        </div>""", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="padding:16px;background:#1E1B4B;border-radius:12px;border:1px solid #2D2B70;display:flex;justify-content:space-between;align-items:center;">
+            <div>
+                <span style="font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:1px;">Projected Stockout Risk</span><br>
+                <div style="font-weight:700;font-size:18px;margin-top:4px;">{res['stockout_risk']}</div>
+            </div>
+            <div>
+                <span style="font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:1px;">Estimated Stock Remaining</span><br>
+                <div style="font-weight:700;font-size:18px;margin-top:4px;color:#CBD5E1;">{res['days_of_stock_remaining']} days</div>
+            </div>
+            <div>
+                <span style="font-size:11px;color:#64748B;text-transform:uppercase;letter-spacing:1px;">Est. Holding Cost</span><br>
+                <div style="font-weight:700;font-size:18px;margin-top:4px;color:#CBD5E1;">${res['estimated_holding_cost']:.2f}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ──────────────────────── TAB 3: MODEL PERFORMANCE ───────────────────────────
+with tab3:
     st.markdown('<div class="section-tag">EVALUATION RESULTS</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Baseline Model Comparison</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-desc">All models evaluated on the same untouched 28-day holdout from real Walmart M5 data.</div>', unsafe_allow_html=True)
