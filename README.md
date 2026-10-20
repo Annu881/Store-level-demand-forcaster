@@ -58,6 +58,22 @@ jupyter notebook
 
 Open `EDA.ipynb` first, then `model.ipynb`. Run the notebooks with the repository root as the working directory so their relative data and model paths resolve correctly. The XGBoost training and feature dataset require substantial disk space and memory.
 
+## Model comparison and selection
+
+The validation comparison below reports MAE for both normal validation (features are built from the observed history) and recursive validation (each prediction is fed back into the history for the next forecast day). Lower MAE is better.
+
+![Bar chart comparing normal and recursive validation MAE for LightGBM, Two-Stage, and XGBoost](assets/model-comparison.png)
+
+| Model | Normal validation MAE | Recursive validation MAE |
+| --- | ---: | ---: |
+| LightGBM | 0.9741 | 1.1669 |
+| Two-Stage (sale occurrence + sale size) | **0.9691** | 1.1453 |
+| XGBoost | 0.9706 | **1.1113** |
+
+XGBoost was selected for the final forecast because recursive validation is the closer match to the intended multi-day use: future sales are unknown, so the model must use its own earlier predictions to build subsequent lag and rolling features. XGBoost has the lowest recursive MAE in this comparison (1.1113), about 3.0% lower than Two-Stage (1.1453) and 4.8% lower than LightGBM (1.1669).
+
+This is a metric-based trade-off, not a claim that XGBoost is best in every setting. Two-Stage has the best normal-validation MAE (0.9691), only 0.0015 below XGBoost (0.9706), but its recursive MAE is higher. The Two-Stage approach also requires a sale-occurrence classifier and a conditional sale-size regressor, while the selected XGBoost pipeline uses one regressor for the recursive forecast. Given the substantially better recursive result and simpler final prediction path, XGBoost is the choice for this project.
+
 ## Evaluation note
 
 The model notebook records an initial XGBoost result for the 28-day forecast period of MAE `1.0629`, RMSE `2.1628`, and WAPE `73.67%`. It reports a moving-average-28 baseline MAE of `1.0641`. These are notebook-reported results, not a guarantee that a fresh run with different data, dependencies, or model settings will produce identical metrics.
