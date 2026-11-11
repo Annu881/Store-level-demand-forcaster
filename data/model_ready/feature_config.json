@@ -1,0 +1,96 @@
+{
+  "TARGET": "sales",
+  "FEATURES": [
+    "wm_yr_wk",
+    "wday",
+    "month",
+    "year",
+    "day_of_week",
+    "day_of_month",
+    "week_of_year",
+    "month_num",
+    "year_num",
+    "sell_price",
+    "price_change",
+    "price_change_pct",
+    "is_price_change",
+    "price_norm",
+    "price_available",
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "lag_56",
+    "roll_mean_7",
+    "roll_std_7",
+    "roll_mean_28",
+    "roll_std_28",
+    "zero_ratio_7",
+    "zero_ratio_28",
+    "days_since_last_sale",
+    "no_previous_sale",
+    "is_event",
+    "snap"
+  ],
+  "CALENDAR_FEATURES": [
+    "wm_yr_wk",
+    "wday",
+    "month",
+    "year",
+    "day_of_week",
+    "day_of_month",
+    "week_of_year",
+    "month_num",
+    "year_num"
+  ],
+  "PRICE_FEATURES": [
+    "sell_price",
+    "price_change",
+    "price_change_pct",
+    "is_price_change",
+    "price_norm",
+    "price_available"
+  ],
+  "LAG_FEATURES": [
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "lag_56"
+  ],
+  "ROLLING_FEATURES": [
+    "roll_mean_7",
+    "roll_std_7",
+    "roll_mean_28",
+    "roll_std_28"
+  ],
+  "DEMAND_FEATURES": [
+    "zero_ratio_7",
+    "zero_ratio_28",
+    "days_since_last_sale",
+    "no_previous_sale"
+  ],
+  "EVENT_FEATURES": [
+    "is_event"
+  ],
+  "SNAP_FEATURES": [
+    "snap"
+  ],
+  "ID_COLS": [
+    "id",
+    "item_id",
+    "dept_id",
+    "cat_id",
+    "store_id",
+    "state_id",
+    "d",
+    "date"
+  ],
+  "META_COLS": [
+    "sales",
+    "is_holdout"
+  ],
+  "HOLDOUT_DAYS": 28,
+  "FINAL_DAY": 1941,
+  "CUTOFF_DAY": 1913
+}

@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Raw competition data and large feature datasets are downloaded/generated locally.
+data/raw/*
+!data/raw/calendar.csv
+data/model_ready/*
+!data/model_ready/feature_config.json
+!data/model_ready/rolling_backtest_metrics.csv
+!data/model_ready/final_forecast_d1914_d1941.parquet
+!data/model_ready/future_forecast_d1942_d1969.parquet
+
+# Keep trained model artifacts, but never upload XGBoost external-memory caches.
+models/*
+!models/final_xgboost.json
+!models/final_xgboost_d1941.json
+models/xgb_cache/
