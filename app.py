@@ -7,9 +7,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from inventory import ReplenishmentInputs, simulate_replenishment
+
 
 ROOT = Path(__file__).resolve().parent
 MODEL_READY = ROOT / "data" / "model_ready"
+QUALITY_REPORT = ROOT / "data" / "quality" / "latest.json"
 FORECAST_FILES = {
     "Final 28-day projection in the example data": (
         MODEL_READY / "future_forecast_d1942_d1969.parquet",
@@ -19,8 +22,13 @@ FORECAST_FILES = {
         MODEL_READY / "final_forecast_d1914_d1941.parquet",
         True,
     ),
+    "Direct XGBoost candidate": (
+        MODEL_READY / "direct_forecast_d1942_d1969.parquet",
+        False,
+    ),
 }
 BACKTEST_FILE = MODEL_READY / "rolling_backtest_metrics.csv"
+DIRECT_METRICS_FILE = MODEL_READY / "direct_evaluation_metrics.csv"
 CALENDAR_FILE = ROOT / "data" / "raw" / "calendar.csv"
 ID_PATTERN = (
     r"^(?P<category>[^_]+)_(?P<department>[^_]+)_"
@@ -57,6 +65,13 @@ def load_forecast(path_string: str, has_actuals: bool) -> pd.DataFrame:
     if not path.is_file():
         raise FileNotFoundError(f"Forecast data not found: {path}")
     frame = pd.read_parquet(path)
+    if "point_forecast" in frame.columns:
+        frame = frame.rename(
+            columns={
+                "forecast_date_day": "d",
+                "point_forecast": "predicted_sales",
+            }
+        )
     required = {"id", "d", "predicted_sales"}
     if has_actuals:
         required.add("actual_sales")
@@ -76,6 +91,46 @@ def load_forecast(path_string: str, has_actuals: bool) -> pd.DataFrame:
             raise ValueError("Calendar is missing dates for one or more forecast days.")
     frame["date"] = pd.to_datetime(frame["date"])
     return frame
+
+
+@st.cache_data(show_spinner=False)
+def load_quality_report(path_string: str) -> dict[str, object]:
+    import json
+
+    path = Path(path_string)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Data-quality report not found: {path}. Run data_quality.py first."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner=False)
+def load_direct_importance(model_path: str, metadata_path: str) -> pd.DataFrame:
+    import json
+    import xgboost as xgb
+
+    model_file = Path(model_path)
+    metadata_file = Path(metadata_path)
+    if not model_file.is_file() or not metadata_file.is_file():
+        raise FileNotFoundError("Direct XGBoost model or metadata is unavailable.")
+    model = xgb.Booster()
+    model.load_model(str(model_file))
+    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+    scores = model.get_score(importance_type="gain")
+    feature_names = metadata["feature_names"]
+    rows = [
+        {
+            "Feature": (
+                feature_names[int(feature[1:])]
+                if feature.startswith("f") and feature[1:].isdigit()
+                else feature
+            ),
+            "Gain importance": float(score),
+        }
+        for feature, score in scores.items()
+    ]
+    return pd.DataFrame(rows).sort_values("Gain importance", ascending=False)
 
 
 @st.cache_data(show_spinner=False)
@@ -183,13 +238,30 @@ with st.sidebar:
     st.header("Explore")
     page = st.radio(
         "Choose a view",
-        ["Explore sales estimates", "Past accuracy", "About this tool"],
+        [
+            "Explore sales estimates",
+            "Past accuracy",
+            "Replenishment simulator",
+            "Data quality",
+            "About this tool",
+        ],
         label_visibility="collapsed",
     )
 
 if page == "Explore sales estimates":
-    selected_forecast = st.selectbox("What would you like to explore?", list(FORECAST_FILES))
-    forecast_path, has_actuals = FORECAST_FILES[selected_forecast]
+    available_forecasts = {
+        label: details
+        for label, details in FORECAST_FILES.items()
+        if details[0].is_file()
+    }
+    if not available_forecasts:
+        st.error("No saved forecast files are available.")
+        st.stop()
+    selected_forecast = st.selectbox(
+        "What would you like to explore?",
+        list(available_forecasts),
+    )
+    forecast_path, has_actuals = available_forecasts[selected_forecast]
     try:
         forecast = load_forecast(str(forecast_path), has_actuals)
     except (FileNotFoundError, ValueError, OSError) as exc:
@@ -418,6 +490,88 @@ elif page == "Past accuracy":
         "Shorter bars mean the estimates were closer to actual daily sales, on average."
     )
 
+    if DIRECT_METRICS_FILE.is_file():
+        direct_metrics = pd.read_csv(DIRECT_METRICS_FILE)
+        overall = direct_metrics.loc[direct_metrics["horizon"] == 0]
+        if not overall.empty:
+            row = overall.iloc[0]
+            st.subheader("Direct XGBoost candidate")
+            st.caption(
+                "This separate horizon-aware model was evaluated on the existing "
+                "d_1914–d_1941 period, which is not an untouched final test."
+            )
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Typical miss (units)": row["MAE"],
+                            "Large-miss score (units)": row["RMSE"],
+                            "Miss vs. sales (%)": row["WAPE_pct"],
+                            "Average over/under (units)": row["Bias"],
+                        }
+                    ]
+                ).round(4),
+                width="stretch",
+                hide_index=True,
+            )
+
+    try:
+        historical_forecast = load_forecast(
+            str(FORECAST_FILES["Past 28-day accuracy check"][0]),
+            has_actuals=True,
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        st.error(f"Could not load detailed past-period results: {exc}")
+    else:
+        historical_forecast["error"] = (
+            historical_forecast["predicted_sales"]
+            - historical_forecast["actual_sales"]
+        )
+        with st.expander("Accuracy by product type or store"):
+            segment = st.radio(
+                "Group results by",
+                ["Product type", "Store"],
+                horizontal=True,
+            )
+            group_column = "category" if segment == "Product type" else "store"
+            segment_rows = []
+            for name, group in historical_forecast.groupby(group_column, sort=True):
+                actual_total = float(group["actual_sales"].abs().sum())
+                segment_rows.append(
+                    {
+                        segment: name,
+                        "Typical miss (units)": group["error"].abs().mean(),
+                        "Large-miss score (units)": (
+                            group["error"].pow(2).mean() ** 0.5
+                        ),
+                        "Miss vs. sales (%)": (
+                            100 * group["error"].abs().sum() / actual_total
+                            if actual_total
+                            else float("nan")
+                        ),
+                        "Average over/under (units)": group["error"].mean(),
+                    }
+                )
+            st.dataframe(
+                pd.DataFrame(segment_rows).round(4),
+                width="stretch",
+                hide_index=True,
+            )
+
+    direct_model = ROOT / "models" / "direct_xgboost.json"
+    direct_metadata = ROOT / "models" / "direct_xgboost_metadata.json"
+    if direct_model.is_file() and direct_metadata.is_file():
+        st.subheader("Direct XGBoost feature importance")
+        try:
+            importance = load_direct_importance(
+                str(direct_model),
+                str(direct_metadata),
+            )
+        except (OSError, ValueError) as exc:
+            st.error(f"Could not load feature importance: {exc}")
+        else:
+            st.bar_chart(importance.head(15).set_index("Feature"))
+
     with st.expander("How to read these scores"):
         st.markdown(
             "- **Typical miss:** the average size of the daily difference between the estimate "
@@ -429,6 +583,146 @@ elif page == "Past accuracy":
             "- **Average over/under:** how far estimates were above or below actual sales on "
             "average. Close to zero is best."
         )
+
+elif page == "Replenishment simulator":
+    st.subheader("Replenishment scenario")
+    st.warning(
+        "This is a planning simulation, not an order recommendation. It uses "
+        "assumptions you provide and requires human review."
+    )
+    available_forecasts = {
+        label: details
+        for label, details in FORECAST_FILES.items()
+        if details[0].is_file() and not details[1]
+    }
+    if not available_forecasts:
+        st.error("No future forecast is available for this simulation.")
+        st.stop()
+    selected_forecast = st.selectbox(
+        "Forecast to use",
+        list(available_forecasts),
+        key="replenishment_forecast",
+    )
+    forecast_path, has_actuals = available_forecasts[selected_forecast]
+    try:
+        forecast = load_forecast(str(forecast_path), has_actuals)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        st.error(f"Could not load forecast data: {exc}")
+        st.stop()
+
+    series = (
+        forecast[["store", "id"]]
+        .drop_duplicates()
+        .sort_values(["store", "id"])
+    )
+    store_options = sorted(series["store"].unique())
+    store = st.selectbox(
+        "Store",
+        store_options,
+        format_func=readable_store,
+        key="replenishment_store",
+    )
+    item_options = series.loc[series["store"] == store, "id"].tolist()
+    selected_id = st.selectbox(
+        "Product",
+        item_options,
+        format_func=readable_series,
+        key="replenishment_item",
+    )
+    with st.form("replenishment_inputs"):
+        first, second, third = st.columns(3)
+        on_hand = first.number_input("Units currently on hand", min_value=0.0, value=0.0)
+        on_order = second.number_input("Units already on order", min_value=0.0, value=0.0)
+        backorders = third.number_input("Units backordered", min_value=0.0, value=0.0)
+        fourth, fifth, sixth = st.columns(3)
+        lead_time = fourth.number_input(
+            "Supplier lead time (days)", min_value=1, max_value=28, value=7
+        )
+        review_period = fifth.number_input(
+            "Review period (days)", min_value=0, max_value=27, value=0
+        )
+        pack_size = sixth.number_input("Units per order pack", min_value=1, value=1)
+        seventh, eighth = st.columns(2)
+        minimum_order = seventh.number_input("Minimum order quantity", min_value=0, value=0)
+        service_level = eighth.selectbox(
+            "Target service level",
+            [0.8, 0.9, 0.95, 0.99],
+            index=2,
+        )
+        daily_residual_std = st.number_input(
+            "Daily forecast-error variability (units)",
+            min_value=0.0,
+            value=0.0,
+            help="Optional estimate; zero means this simulation adds no safety stock.",
+        )
+        submitted = st.form_submit_button("Run simulation")
+
+    if submitted:
+        protection_days = int(lead_time + review_period)
+        selected = forecast.loc[forecast["id"] == selected_id].sort_values("date")
+        daily_forecasts = selected["predicted_sales"].astype(float).tolist()
+        if protection_days > len(daily_forecasts):
+            st.error("Lead time plus review period exceeds the available forecast horizon.")
+        else:
+            try:
+                result = simulate_replenishment(
+                    daily_forecasts,
+                    ReplenishmentInputs(
+                        on_hand=on_hand,
+                        on_order=on_order,
+                        backorders=backorders,
+                        lead_time_days=int(lead_time),
+                        review_period_days=int(review_period),
+                        pack_size=int(pack_size),
+                        minimum_order_quantity=int(minimum_order),
+                        service_level=service_level,
+                        daily_residual_std=daily_residual_std,
+                    ),
+                )
+            except ValueError as exc:
+                st.error(f"Could not run simulation: {exc}")
+            else:
+                first, second, third = st.columns(3)
+                first.metric(
+                    "Inventory position",
+                    f"{result['inventory_position']:,.1f} units",
+                )
+                second.metric("Reorder point", f"{result['reorder_point']:,.1f} units")
+                third.metric(
+                    "Simulated order quantity",
+                    f"{result['suggested_order_quantity']:,} units",
+                )
+                st.write(result["severity"])
+                st.caption(result["disclaimer"])
+
+elif page == "Data quality":
+    st.subheader("Dataset checks")
+    try:
+        report = load_quality_report(str(QUALITY_REPORT))
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        st.info(str(exc))
+        st.code("python .\\data_quality.py", language="powershell")
+        st.stop()
+    st.caption(
+        f"Data version: {report['data_version']} · "
+        f"Report created: {report['generated_at_utc']}"
+    )
+    sales_quality = report["sales"]
+    calendar_quality = report["calendar"]
+    price_quality = report["prices"]
+    first, second, third = st.columns(3)
+    first.metric("Product/store series", f"{sales_quality['series_count']:,}")
+    second.metric("Sales days", f"{sales_quality['day_count']:,}")
+    third.metric("Price rows checked", f"{price_quality['row_count']:,}")
+    st.json(
+        {
+            "Sales": sales_quality,
+            "Calendar": calendar_quality,
+            "Prices": price_quality,
+            "Limitations": report["limitations"],
+        },
+        expanded=False,
+    )
 
 elif page == "About this tool":
     st.subheader("About this sales-estimate tool")
@@ -447,6 +741,11 @@ elif page == "About this tool":
         The extra 28-day estimate covers May 23–June 19, 2016. These are historical
         dataset dates, not today's or upcoming dates. Actual sales for that period
         were not supplied, so we cannot measure the accuracy of this estimate.
+
+        XGBoost was retained because the saved recursive comparison reported a
+        lower recursive MAE than LightGBM and the two-stage candidate. A separate
+        direct XGBoost candidate follows the requested 1–28-day design and must be
+        trained and evaluated fairly before replacing the recursive model.
 
         **How to use it**
 

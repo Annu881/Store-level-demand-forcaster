@@ -10,9 +10,18 @@ data/model_ready/*
 !data/model_ready/rolling_backtest_metrics.csv
 !data/model_ready/final_forecast_d1914_d1941.parquet
 !data/model_ready/future_forecast_d1942_d1969.parquet
+data/model_ready/direct_training_examples.parquet
+data/model_ready/direct_forecast_*.parquet
+data/model_ready/direct_metrics_*.csv
+data/model_ready/direct_evaluation_metrics.csv
+data/model_ready/direct_rolling_backtest_metrics.csv
+data/model_ready/forecast_app.sqlite
+data/quality/
 
 # Keep trained model artifacts, but never upload XGBoost external-memory caches.
 models/*
 !models/final_xgboost.json
 !models/final_xgboost_d1941.json
+!models/direct_xgboost.json
+!models/direct_xgboost_metadata.json
 models/xgb_cache/
