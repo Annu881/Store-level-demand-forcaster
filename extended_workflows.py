@@ -66,11 +66,13 @@ class ParquetTrainingIterator(xgb.DataIter):
         batch = next(self._batches, None)
         if batch is None:
             return False
-        frame = batch.to_pandas()
+        # Memory-efficient conversion: split_blocks + self_destruct minimizes peak RAM
+        frame = batch.to_pandas(split_blocks=True, self_destruct=True)
         input_data(
-            data=frame[self.columns[:-1]].to_numpy(dtype=np.float32),
-            label=frame[self.columns[-1]].to_numpy(dtype=np.float32),
+            data=np.ascontiguousarray(frame[self.columns[:-1]].to_numpy(dtype=np.float32, copy=False)),
+            label=np.ascontiguousarray(frame[self.columns[-1]].to_numpy(dtype=np.float32, copy=False)),
         )
+        del frame
         return True
 
     def reset(self) -> None:
@@ -84,14 +86,18 @@ class ParquetTrainingIterator(xgb.DataIter):
 
 
 class TrainingProgress(xgb.callback.TrainingCallback):
+    def __init__(self, total_rounds: int = BOOST_ROUNDS) -> None:
+        super().__init__()
+        self.total_rounds = total_rounds
+
     def after_iteration(
         self,
         model: xgb.Booster,
         epoch: int,
         evals_log: dict[str, Any],
     ) -> bool:
-        if epoch == 0 or (epoch + 1) % 25 == 0 or epoch + 1 == BOOST_ROUNDS:
-            print(f"Completed boosting round {epoch + 1}/{BOOST_ROUNDS}.", flush=True)
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch + 1 == self.total_rounds:
+            print(f"Completed boosting round {epoch + 1}/{self.total_rounds}.", flush=True)
         return False
 
 
@@ -115,7 +121,14 @@ def load_feature_dataset() -> ds.Dataset:
     return ds.dataset(FEATURE_DATA, format="parquet")
 
 
-def train_model(dataset: ds.Dataset, features: list[str], target: str, end_day: int) -> xgb.Booster:
+def train_model(
+    dataset: ds.Dataset,
+    features: list[str],
+    target: str,
+    end_day: int,
+    num_boost_round: int = BOOST_ROUNDS,
+    early_stopping_rounds: int | None = None,
+) -> xgb.Booster:
     training_days = [f"d_{day}" for day in range(1, end_day + 1)]
     row_filter = ds.field("d").isin(training_days)
     columns = features + [target]
@@ -139,9 +152,13 @@ def train_model(dataset: ds.Dataset, features: list[str], target: str, end_day: 
 
     print(
         f"Training through d_{end_day}: {row_count:,} rows, "
-        f"{BOOST_ROUNDS} boosting rounds.",
+        f"{num_boost_round} boosting rounds.",
         flush=True,
     )
+    callbacks = [TrainingProgress(total_rounds=num_boost_round)]
+    if early_stopping_rounds is not None and early_stopping_rounds > 0:
+        callbacks.append(xgb.callback.EarlyStopping(rounds=early_stopping_rounds))
+
     with tempfile.TemporaryDirectory(
         prefix=f"xgb_train_d{end_day}_",
         dir=MODEL_DIR / "xgb_cache",
@@ -157,8 +174,8 @@ def train_model(dataset: ds.Dataset, features: list[str], target: str, end_day: 
         model = xgb.train(
             params=parameters,
             dtrain=matrix,
-            num_boost_round=BOOST_ROUNDS,
-            callbacks=[TrainingProgress()],
+            num_boost_round=num_boost_round,
+            callbacks=callbacks,
         )
         del matrix, iterator
         gc.collect()
@@ -387,14 +404,24 @@ def run_future_forecast(
     dataset: ds.Dataset,
     features: list[str],
     target: str,
+    model_output: Path | None = None,
+    forecast_output: Path | None = None,
+    num_boost_round: int = BOOST_ROUNDS,
 ) -> tuple[Path, Path]:
     forecast_start, forecast_end = 1942, 1969
     latest_actual_day = forecast_start - 1
     if not (SALES_FILE.is_file() and CALENDAR_FILE.is_file() and PRICES_FILE.is_file()):
         raise FileNotFoundError("Raw sales, calendar, and sell-price CSVs are required.")
 
-    model = train_model(dataset, features, target, latest_actual_day)
-    model_path = MODEL_DIR / "final_xgboost_d1941.json"
+    model = train_model(
+        dataset,
+        features,
+        target,
+        latest_actual_day,
+        num_boost_round=num_boost_round,
+    )
+    model_path = model_output or MODEL_DIR / "final_xgboost_d1941.json"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(str(model_path))
     print(f"Future-forecast model saved to {model_path}", flush=True)
 
@@ -576,7 +603,11 @@ def run_future_forecast(
         previous_price = current_price
         print(f"Forecasted {day_name}", flush=True)
 
-    output_path = RESULT_DIR / "future_forecast_d1942_d1969.parquet"
+    output_path = (
+        forecast_output
+        or RESULT_DIR / "future_forecast_d1942_d1969.parquet"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.concat(predictions, ignore_index=True).to_parquet(output_path, index=False)
     del model
     gc.collect()
@@ -590,6 +621,9 @@ def main() -> None:
         choices=("backtest", "future", "all"),
         help="Run rolling backtests, a future forecast, or both.",
     )
+    parser.add_argument("--model-output", type=Path)
+    parser.add_argument("--forecast-output", type=Path)
+    parser.add_argument("--num-boost-round", type=int, default=BOOST_ROUNDS)
     args = parser.parse_args()
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     (MODEL_DIR / "xgb_cache").mkdir(parents=True, exist_ok=True)
@@ -601,7 +635,14 @@ def main() -> None:
         result_path = run_backtests(dataset, features, target)
         print(f"Rolling backtest results: {result_path}")
     if args.task in ("future", "all"):
-        model_path, forecast_path = run_future_forecast(dataset, features, target)
+        model_path, forecast_path = run_future_forecast(
+            dataset,
+            features,
+            target,
+            model_output=args.model_output,
+            forecast_output=args.forecast_output,
+            num_boost_round=args.num_boost_round,
+        )
         print(f"Updated final model: {model_path}")
         print(f"Future forecasts: {forecast_path}")
 

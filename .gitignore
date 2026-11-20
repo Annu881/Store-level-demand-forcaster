@@ -17,6 +17,7 @@ data/model_ready/direct_evaluation_metrics.csv
 data/model_ready/direct_rolling_backtest_metrics.csv
 data/model_ready/forecast_app.sqlite
 data/quality/
+data/user_data/
 
 # Keep trained model artifacts, but never upload XGBoost external-memory caches.
 models/*

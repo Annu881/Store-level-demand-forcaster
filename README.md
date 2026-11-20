@@ -9,6 +9,9 @@ This project explores and forecasts daily retail unit sales for item/store serie
 ├── EDA.ipynb                 # Dataset exploration, feature engineering, and model-ready data
 ├── model.ipynb               # Baselines, model experiments, training, and forecasting
 ├── direct_forecasting.py     # Direct 1–28-day XGBoost training, forecasting, evaluation
+├── forecasting_service.py    # Joblib model bundle, CSV validation, reusable inference
+├── training_jobs.py          # Start and monitor background dashboard training jobs
+├── training_job_runner.py    # Validate and save versioned model/forecast artifacts
 ├── data_quality.py           # M5 schema, key, date, and value checks
 ├── inventory.py              # Validated replenishment scenario calculations
 ├── api.py                    # FastAPI forecasts, analytics, and simulation endpoints
@@ -36,29 +39,30 @@ python -m streamlit run app.py
 
 Open the `Local URL` printed by Streamlit, usually `http://localhost:8501`. Stop the app with **Ctrl+C**.
 
-This starts the frontend using the **saved M5 forecasts already in `data/model_ready/`**. It does not train a model, create forecasts, or call the API. In the sidebar, try **Explore sales estimates**, **Past accuracy**, **Replenishment simulator**, **Data quality**, and **About this tool**. If an optional generated forecast file is absent, it will not be offered.
+On the first forecast request, the dashboard packages the existing `models/final_xgboost_d1941.json` model as `models/recursive_xgboost.joblib` if the bundle is missing. This packages an already-trained model; it does not retrain. The app caches the loaded model while running and reuses it on later requests and app reruns. If that model artifact is unavailable, create the bundle explicitly with `python .\forecasting_service.py package-existing`.
 
-The saved forecast the dashboard shows is determined by the forecast Parquet files and paths configured in `app.py`. The `d_1942`–`d_1969` projection is an example based on the historical M5 dataset, not a forecast for the current date or for new Walmart data.
+Choose **Explore sales estimates** and upload a recent daily-sales CSV with columns `id,date,sales`; `sell_price` is optional. Re-uploaded `id,date` pairs update saved local history. The app keeps actual sales and future predictions in separate charts and saves the forecast and provenance under `data/user_data/`. It refuses to present the old 2016 M5 example projection as a current forecast.
+
+Every series uses recursive XGBoost when the saved model's numeric feature schema is compatible; the series ID does not have to match an M5 ID. At least 28 consecutive daily observations are required. If fewer than 56 days are available, the unavailable `lag_56` is passed as missing (not replaced by zero), which the trained XGBoost model supports. Forecasting or model errors are reported rather than silently replaced with a constant-average forecast. Forecast dates are generated after the newest observed date and must be current (the latest input date cannot be older than yesterday). For dates beyond the M5 calendar, calendar events and SNAP are set to zero and the last known price is carried forward; predictions should be reviewed carefully.
 
 ### How the pieces connect
 
 ```text
-M5 sales_train_evaluation.csv + calendar.csv + sell_prices.csv
-                         |
-                         v
-EDA.ipynb  ->  feature preparation in data/model_ready/
-                         |
-                         v
-model.ipynb  ->  trains/evaluates the selected recursive XGBoost model
-                         |
-                         v
-extended_workflows.py  ->  optional rolling tests or future M5 forecast
-                         |
-                         v
-saved forecast Parquet files  ->  app.py reads and displays results
+M5 history -> one-time training (not triggered by the dashboard)
+           -> XGBoost model + feature schema -> joblib model bundle
+
+recent sales CSV -> validate/update local history -> reuse cached joblib model
+                 -> 28-day future forecast + metadata -> separate actual/forecast charts
 ```
 
-`model.ipynb` is the original experiment and recursive-model training workflow. `models/final_xgboost.json` is its model artifact. Opening the dashboard only reads saved forecasts; it does not automatically load this model or retrain it. After changing data or training a new model, generate and save a matching forecast, then configure the dashboard to display that forecast.
+`model.ipynb` is the original model experimentation and training workflow. The dashboard loads its already-trained recursive XGBoost artifact; opening the app, uploading data, or requesting a forecast never trains automatically. **Train and save M5 forecast** offers two explicit manual retraining options:
+
+- **Train from saved uploaded sales** uses the saved local upload history, requires at least 90 consecutive daily observations for eligible series and at least 1,000 generated training examples, then activates a versioned `.joblib` model. For bounded runtime, it samples at most 10,000 series and uses up to the latest 28 eligible target days per series. It reuses the configured feature schema and records the training-data hash and date range in model metadata.
+- **Retrain on the full M5 training dataset** launches the existing background M5 training workflow. It requires the local M5 source and engineered-feature files and may take a long time.
+
+Both options require an explicit confirmation; neither is triggered by an upload or forecast request. The active model pointer is stored under `models/active_recursive_xgboost.json`. Keep the prior bundle if you may want to roll back. Models trained on a small or unrepresentative set of uploaded series may not generalize well; evaluate a newly trained model before relying on its predictions.
+
+The upload schema is deliberately explicit: `id` is a stable product/store series key, `date` is a daily date, `sales` is a finite non-negative unit count, and optional `sell_price` is a positive price. The local history merges successive uploads, with the newest value replacing an existing row for the same `id,date`. Upload files must have a common latest date across included series. User uploads and forecasts are local and excluded from Git.
 
 ## Workflow
 
@@ -166,7 +170,7 @@ The generated future forecast contains 853,720 predictions: 30,490 series for ea
 
 ## Interactive dashboard
 
-The Streamlit dashboard uses plain-language date ranges (for example, May 23–June 19, 2016) instead of dataset day codes. It lets users explore estimates by product type, store, and item; compare estimated and actual sales for a past test period; and understand model accuracy without working with notebooks. The final-period M5 projection is clearly marked as a historical example, not a live forecast.
+The Streamlit dashboard lets users upload recent sales, view uploaded actuals separately from future predictions, and see the model version, training-date provenance, forecast range, and source data. The old 2016 M5 future projection is not offered as a current forecast. Past model evaluation remains under **Past accuracy**.
 
 From the project directory, install the dashboard dependencies and start the app:
 
@@ -175,7 +179,7 @@ python -m pip install -r requirements-app.txt
 python -m streamlit run app.py
 ```
 
-The app reads the saved Parquet and CSV outputs; it does not retrain the model. The M5 final-period forecast is a historical dataset forecast, not current real-world demand guidance.
+The app loads a saved `joblib` model bundle and reuses it; predictions do not retrain. The first request can package the existing native XGBoost model once if needed.
 
 ### Optional API
 
@@ -187,16 +191,28 @@ python -m uvicorn api:app --reload --host 127.0.0.1 --port 8000
 
 Check `http://127.0.0.1:8000/health` for service status or `http://127.0.0.1:8000/docs` to try the endpoints. Stop the API with **Ctrl+C**. Running the API does not train a model either.
 
-### How to verify the app and saved model outputs
+### Upload data format and verification
+
+CSV rows must use this shape:
+
+```csv
+id,date,sales,sell_price
+FOODS_1_001_CA_1_evaluation,2026-11-13,4,2.50
+FOODS_1_001_CA_1_evaluation,2026-11-14,6,2.50
+```
+
+The example rows illustrate the required format only; use actual sales values in your own file. For each series, provide at least 28 consecutive daily observations. The saved XGBoost model can also predict when `lag_56` is missing for series with 28–55 days of history; 56 days provide a fully observed lag window. The upload must contain recent dates (latest date no older than yesterday) and every included series must end on the same date. The app combines the new upload with saved local history and uses the latest version for duplicate `id,date` rows.
 
 1. Start Streamlit using the Quick start commands above.
-2. In **Explore sales estimates**, choose a saved forecast and verify the date range, chart, and product/store filters.
-3. In **Past accuracy**, verify the historical holdout and rolling evaluation values.
-4. Try **Replenishment simulator** with sample inventory numbers. It is an assumption-based simulation, not an order recommendation.
-5. In **Data quality**, verify the report is loaded. To regenerate it from the raw M5 files, run `python .\data_quality.py`.
-6. For API checks, start Uvicorn separately and open `/docs`; `/health` confirms the API process is responsive.
+2. In **Explore sales estimates**, upload CSV and click **Validate data and generate 28-day forecast**.
+3. Check that the **Actual historical sales** chart contains sales only, while **Future predictions** starts the next day.
+4. Verify the displayed model version, training date (or the explicit “not recorded” status for the legacy model), data source, and 28 forecast dates.
+5. Confirm the displayed method is `recursive_xgboost` for each selected series. The dashboard reports model errors instead of using an average fallback.
+6. In **Past accuracy**, inspect historical held-out results; this is separate from the current uploaded forecast.
+7. Try **Replenishment simulator** only after a forecast exists. It is an assumption-based simulation, not an order recommendation.
+8. **Train and save M5 forecast** offers two explicit options after confirmation: retrain on the full M5 training table in the background, or retrain from saved uploaded sales when the 90-day and 1,000-example minimums are met. Neither option starts automatically on upload.
 
-The saved files and the dashboard are connected by file paths, not by live model inference. To check a newly trained model, generate a new forecast with that model, verify its dates and series in the output, and point `app.py` to that forecast file. The current final direct-XGBoost model is a comparison candidate trained through `d_1913`; it is not the selected recursive model and no direct forecast for `d_1942`–`d_1969` has been generated.
+Training-job status, uploaded sales history, generated forecast files, and versioned model artifacts are local and intentionally excluded from Git. Source and workflow tests can be run with `python -m unittest discover -s tests -v`.
 
 ## PRD workflow additions
 

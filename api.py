@@ -218,11 +218,13 @@ def forecasts(
         frame = frame.loc[frame["store_id"] == store_id]
     if item_id is not None:
         frame = frame.loc[frame["item_id"] == item_id]
-    if horizon is not None:
+    horizon_val = horizon if isinstance(horizon, int) else None
+    if horizon_val is not None:
         if "horizon" not in frame:
             raise HTTPException(status_code=400, detail="Horizon filtering is unavailable.")
-        frame = frame.loc[frame["horizon"] == horizon]
-    rows = frame.head(limit).copy()
+        frame = frame.loc[frame["horizon"] == horizon_val]
+    limit_count = limit if isinstance(limit, int) else getattr(limit, "default", 100)
+    rows = frame.head(limit_count).copy()
     rows["date"] = rows["date"].dt.strftime("%Y-%m-%d")
     return {
         "forecast_type": forecast_type,
@@ -270,7 +272,8 @@ def residuals(
         frame = frame.loc[frame["store_id"] == store_id]
     if item_id is not None:
         frame = frame.loc[frame["item_id"] == item_id]
-    frame = frame.head(limit).copy()
+    limit_count = limit if isinstance(limit, int) else getattr(limit, "default", 100)
+    frame = frame.head(limit_count).copy()
     frame["residual"] = frame["predicted_sales"] - frame["actual_sales"]
     frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
     return {"row_count": len(frame), "rows": frame.to_dict(orient="records")}

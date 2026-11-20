@@ -77,7 +77,7 @@ def _inspect_prices(
                 numeric_prices = pd.to_numeric(chunk["sell_price"], errors="coerce")
                 invalid_prices += int(
                     (~np.isfinite(numeric_prices) | numeric_prices.lt(0)).sum()
-                )
+                )     
                 before_insert = connection.total_changes
                 connection.executemany(
                     "INSERT OR IGNORE INTO price_keys VALUES (?, ?, ?)",
@@ -241,6 +241,37 @@ def validate_m5_inputs(
             "M5 contains observed sales, not confirmed unconstrained demand.",
             "M5 does not contain inventory, availability, or confirmed stock-out labels.",
         ],
+    }
+
+
+def check_sales_distribution_drift(
+    uploaded_sales: pd.DataFrame,
+    reference_mean: float = 1.35,
+    reference_zero_ratio: float = 0.65,
+) -> dict[str, Any]:
+    """Check if uploaded sales deviate significantly from M5 baseline distributions."""
+    if uploaded_sales.empty or "sales" not in uploaded_sales.columns:
+        return {"status": "insufficient_data", "drift_detected": False}
+    sales = pd.to_numeric(uploaded_sales["sales"], errors="coerce").dropna()
+    if sales.empty:
+        return {"status": "insufficient_data", "drift_detected": False}
+    mean_val = float(sales.mean())
+    zero_ratio = float((sales == 0).mean())
+    drift_warnings: list[str] = []
+    if abs(mean_val - reference_mean) > 3.0:
+        drift_warnings.append(
+            f"Mean sales ({mean_val:.2f}) differs substantially from baseline ({reference_mean:.2f})."
+        )
+    if abs(zero_ratio - reference_zero_ratio) > 0.35:
+        drift_warnings.append(
+            f"Zero-sales ratio ({zero_ratio:.2%}) differs from baseline ({reference_zero_ratio:.2%})."
+        )
+    return {
+        "status": "warning" if drift_warnings else "normal",
+        "drift_detected": bool(drift_warnings),
+        "mean_sales": round(mean_val, 3),
+        "zero_sales_ratio": round(zero_ratio, 3),
+        "warnings": drift_warnings,
     }
 
 
