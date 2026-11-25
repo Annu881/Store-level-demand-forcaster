@@ -64,15 +64,71 @@ class ReplenishmentRequest(BaseModel):
         return value
 
 
-@lru_cache(maxsize=4)
-def _read_forecast(kind: str) -> pd.DataFrame:
+def _parse_m5_metadata(frame: pd.DataFrame, kind: str, day_min: int | None = None) -> pd.DataFrame:
+    """Validate and enrich legacy M5 forecast rows with horizon, store_id, item_id, and date."""
+    required = {"id", "d", "predicted_sales"}
+    if kind == "historical":
+        required.add("actual_sales")
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"{FORECAST_PATHS[kind].name} is missing columns: {sorted(missing)}")
+    if frame.empty:
+        return frame.assign(
+            horizon=pd.Series(dtype="int64"),
+            category=pd.Series(dtype="object"),
+            store_id=pd.Series(dtype="object"),
+            item_id=pd.Series(dtype="object"),
+            date=pd.to_datetime(pd.Series(dtype="object")),
+        )
+    frame = frame.copy()
+    day_numbers = frame["d"].str.extract(r"^d_([0-9]+)$")[0]
+    if day_numbers.isna().any():
+        raise ValueError(f"{FORECAST_PATHS[kind].name} contains an invalid day label.")
+    base_day = day_min if day_min is not None else int(day_numbers.astype(int).min())
+    frame["horizon"] = day_numbers.astype(int) - base_day + 1
+    parsed = frame["id"].str.extract(
+        r"^(?P<category>[^_]+)_(?P<department>[^_]+)_(?P<item_number>[^_]+)_"
+        r"(?P<state>CA|TX|WI)_(?P<store_number>[0-9]+)_evaluation$"
+    )
+    if parsed.isna().to_numpy().any():
+        raise ValueError("Forecast contains an invalid M5 series ID.")
+    frame["category"] = parsed["category"]
+    frame["store_id"] = parsed["state"] + "_" + parsed["store_number"]
+    frame["item_id"] = (
+        parsed["category"] + "_" + parsed["department"] + "_" + parsed["item_number"]
+    )
+    if "date" not in frame.columns:
+        if not CALENDAR_FILE.is_file():
+            raise FileNotFoundError(f"Calendar data not found: {CALENDAR_FILE}")
+        calendar = pd.read_csv(CALENDAR_FILE, usecols=["d", "date"])
+        frame = frame.merge(calendar, on="d", how="left", validate="many_to_one")
+    frame["date"] = pd.to_datetime(frame["date"], errors="raise")
+    return frame
+
+
+def _read_forecast_filtered(
+    kind: str,
+    store_id: str | None = None,
+    item_id: str | None = None,
+    horizon: int | None = None,
+    limit: int | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """Read forecast parquet with pushdown/pre-slice filtering to stay within 512 MB RAM."""
     if kind not in FORECAST_PATHS:
         raise ValueError(f"Unknown forecast type: {kind}")
     path = FORECAST_PATHS[kind]
     if not path.is_file():
         raise FileNotFoundError(f"{kind.title()} forecast is not available: {path}")
-    frame = pd.read_parquet(path)
+
     if kind == "direct":
+        filters: list = []
+        if store_id is not None:
+            filters.append(("store_id", "==", store_id))
+        if item_id is not None:
+            filters.append(("item_id", "==", item_id))
+        if horizon is not None:
+            filters.append(("horizon", "==", horizon))
+        frame = pd.read_parquet(path, filters=filters if filters else None)
         required = {
             "id",
             "store_id",
@@ -95,50 +151,71 @@ def _read_forecast(kind: str) -> pd.DataFrame:
             }
         )
         frame["horizon"] = frame["horizon"].astype(int)
-    else:
-        required = {"id", "d", "predicted_sales"}
-        if kind == "historical":
-            required.add("actual_sales")
-        missing = required.difference(frame.columns)
-        if missing:
-            raise ValueError(f"{path.name} is missing columns: {sorted(missing)}")
-        frame = frame.copy()
-        day_numbers = frame["d"].str.extract(r"^d_([0-9]+)$")[0]
-        if day_numbers.isna().any():
-            raise ValueError(f"{path.name} contains an invalid day label.")
-        frame["horizon"] = (
-            day_numbers.astype(int) - day_numbers.astype(int).min() + 1
-        )
-        parsed = frame["id"].str.extract(
-            r"^(?P<category>[^_]+)_(?P<department>[^_]+)_(?P<item_number>[^_]+)_"
-            r"(?P<state>CA|TX|WI)_(?P<store_number>[0-9]+)_evaluation$"
-        )
-        if parsed.isna().to_numpy().any():
-            raise ValueError("Forecast contains an invalid M5 series ID.")
-        frame["category"] = parsed["category"]
-        frame["store_id"] = parsed["state"] + "_" + parsed["store_number"]
-        frame["item_id"] = (
-            parsed["category"] + "_" + parsed["department"] + "_" + parsed["item_number"]
-        )
-        if "date" not in frame.columns:
-            if not CALENDAR_FILE.is_file():
-                raise FileNotFoundError(f"Calendar data not found: {CALENDAR_FILE}")
-            calendar = pd.read_csv(CALENDAR_FILE, usecols=["d", "date"])
-            frame = frame.merge(calendar, on="d", how="left", validate="many_to_one")
         frame["date"] = pd.to_datetime(frame["date"], errors="raise")
-    frame["date"] = pd.to_datetime(frame["date"], errors="raise")
+        if frame["predicted_sales"].isna().any() or (frame["predicted_sales"] < 0).any():
+            raise ValueError("Forecast predictions must be present and non-negative.")
+        total_matching = len(frame)
+        if limit is not None:
+            frame = frame.head(limit).copy()
+        return frame, total_matching
+
+    # Legacy parquets ("historical" and "recursive") only store `id` (not `store_id`/`item_id`)
+    filters = []
+    if store_id is not None and item_id is not None:
+        filters.append(("id", "==", f"{item_id}_{store_id}_evaluation"))
+    frame = pd.read_parquet(path, filters=filters if filters else None)
+
+    if store_id is not None and item_id is None:
+        frame = frame.loc[frame["id"].str.endswith(f"_{store_id}_evaluation")]
+    elif item_id is not None and store_id is None:
+        frame = frame.loc[frame["id"].str.startswith(f"{item_id}_")]
+
+    day_min: int | None = None
+    if not frame.empty:
+        day_nums = frame["d"].str.slice(2).astype(int)
+        day_min = int(day_nums.min())
+        if horizon is not None:
+            frame = frame.loc[day_nums == (day_min + horizon - 1)]
+
+    total_matching = len(frame)
+    if limit is not None:
+        frame = frame.head(limit)
+
+    frame = _parse_m5_metadata(frame, kind, day_min=day_min)
     if frame["predicted_sales"].isna().any() or (frame["predicted_sales"] < 0).any():
         raise ValueError("Forecast predictions must be present and non-negative.")
+    return frame, total_matching
+
+
+def _read_forecast(kind: str) -> pd.DataFrame:
+    frame, _ = _read_forecast_filtered(kind)
     return frame
 
 
-def _get_forecast(kind: str) -> pd.DataFrame:
+def _get_forecast_filtered(
+    kind: str,
+    store_id: str | None = None,
+    item_id: str | None = None,
+    horizon: int | None = None,
+    limit: int | None = None,
+) -> tuple[pd.DataFrame, int]:
     try:
-        return _read_forecast(kind)
+        return _read_forecast_filtered(
+            kind,
+            store_id=store_id,
+            item_id=item_id,
+            horizon=horizon,
+            limit=limit,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _get_forecast(kind: str) -> pd.DataFrame:
+    frame, _ = _get_forecast_filtered(kind)
+    return frame
 
 
 def _database() -> sqlite3.Connection:
@@ -213,23 +290,21 @@ def forecasts(
     horizon: int | None = Query(default=None, ge=1, le=28),
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> dict[str, object]:
-    frame = _get_forecast(forecast_type)
-    if store_id is not None:
-        frame = frame.loc[frame["store_id"] == store_id]
-    if item_id is not None:
-        frame = frame.loc[frame["item_id"] == item_id]
     horizon_val = horizon if isinstance(horizon, int) else None
-    if horizon_val is not None:
-        if "horizon" not in frame:
-            raise HTTPException(status_code=400, detail="Horizon filtering is unavailable.")
-        frame = frame.loc[frame["horizon"] == horizon_val]
     limit_count = limit if isinstance(limit, int) else getattr(limit, "default", 100)
-    rows = frame.head(limit_count).copy()
+    rows, total_matching = _get_forecast_filtered(
+        forecast_type,
+        store_id=store_id,
+        item_id=item_id,
+        horizon=horizon_val,
+        limit=limit_count,
+    )
+    rows = rows.copy()
     rows["date"] = rows["date"].dt.strftime("%Y-%m-%d")
     return {
         "forecast_type": forecast_type,
         "row_count": len(rows),
-        "total_matching_rows": len(frame),
+        "total_matching_rows": total_matching,
         "rows": rows.to_dict(orient="records"),
     }
 
@@ -238,25 +313,55 @@ def forecasts(
 def segment_metrics(
     by: Literal["category", "store_id"] = "category",
 ) -> list[dict[str, object]]:
-    frame = _get_forecast("historical")
-    if "category" not in frame:
-        parsed = frame["id"].str.extract(r"^(?P<category>[^_]+)_")
-        frame["category"] = parsed["category"]
-    frame["error"] = frame["predicted_sales"] - frame["actual_sales"]
+    import pyarrow.parquet as pq
+
+    path = FORECAST_PATHS["historical"]
+    if not path.is_file():
+        raise HTTPException(status_code=503, detail=f"Historical forecast is not available: {path}")
+
+    stats: dict[str, dict[str, float]] = {}
+    pf = pq.ParquetFile(path)
+    for batch in pf.iter_batches(batch_size=100_000, columns=["id", "predicted_sales", "actual_sales"]):
+        chunk = batch.to_pandas()
+        if by == "category":
+            chunk[by] = chunk["id"].str.split("_", n=1).str[0]
+        else:
+            parts = chunk["id"].str.rsplit("_", n=3)
+            chunk[by] = parts.str[-3] + "_" + parts.str[-2]
+        chunk["error"] = chunk["predicted_sales"] - chunk["actual_sales"]
+        chunk["abs_error"] = chunk["error"].abs()
+        chunk["sq_error"] = chunk["error"].pow(2)
+        chunk["abs_actual"] = chunk["actual_sales"].abs()
+        grouped = chunk.groupby(by, sort=False).agg(
+            abs_error=("abs_error", "sum"),
+            sq_error=("sq_error", "sum"),
+            error=("error", "sum"),
+            abs_actual=("abs_actual", "sum"),
+            count=("error", "count"),
+        )
+        for key, row in grouped.iterrows():
+            acc = stats.setdefault(
+                str(key),
+                {"abs_error": 0.0, "sq_error": 0.0, "error": 0.0, "abs_actual": 0.0, "count": 0.0},
+            )
+            acc["abs_error"] += float(row["abs_error"])
+            acc["sq_error"] += float(row["sq_error"])
+            acc["error"] += float(row["error"])
+            acc["abs_actual"] += float(row["abs_actual"])
+            acc["count"] += float(row["count"])
+
     results = []
-    for key, group in frame.groupby(by, sort=True):
-        actual_total = float(group["actual_sales"].abs().sum())
+    for key in sorted(stats):
+        acc = stats[key]
+        n = acc["count"]
+        actual_total = acc["abs_actual"]
         results.append({
             by: key,
-            "MAE": float(group["error"].abs().mean()),
-            "RMSE": float((group["error"].pow(2).mean()) ** 0.5),
-            "WAPE_pct": (
-                float(100 * group["error"].abs().sum() / actual_total)
-                if actual_total
-                else None
-            ),
-            "Bias": float(group["error"].mean()),
-            "row_count": int(len(group)),
+            "MAE": float(acc["abs_error"] / n) if n else 0.0,
+            "RMSE": float((acc["sq_error"] / n) ** 0.5) if n else 0.0,
+            "WAPE_pct": float(100 * acc["abs_error"] / actual_total) if actual_total else None,
+            "Bias": float(acc["error"] / n) if n else 0.0,
+            "row_count": int(n),
         })
     return results
 
@@ -267,13 +372,14 @@ def residuals(
     item_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> dict[str, object]:
-    frame = _get_forecast("historical")
-    if store_id is not None:
-        frame = frame.loc[frame["store_id"] == store_id]
-    if item_id is not None:
-        frame = frame.loc[frame["item_id"] == item_id]
     limit_count = limit if isinstance(limit, int) else getattr(limit, "default", 100)
-    frame = frame.head(limit_count).copy()
+    frame, _ = _get_forecast_filtered(
+        "historical",
+        store_id=store_id,
+        item_id=item_id,
+        limit=limit_count,
+    )
+    frame = frame.copy()
     frame["residual"] = frame["predicted_sales"] - frame["actual_sales"]
     frame["date"] = frame["date"].dt.strftime("%Y-%m-%d")
     return {"row_count": len(frame), "rows": frame.to_dict(orient="records")}
@@ -302,10 +408,12 @@ def feature_importance() -> list[dict[str, object]]:
 
 @app.post("/replenishment", status_code=201)
 def replenishment_simulation(request: ReplenishmentRequest) -> dict[str, object]:
-    frame = _get_forecast(request.forecast_type)
-    selected = frame.loc[
-        (frame["store_id"] == request.store_id) & (frame["item_id"] == request.item_id)
-    ].sort_values("date")
+    selected, _ = _get_forecast_filtered(
+        request.forecast_type,
+        store_id=request.store_id,
+        item_id=request.item_id,
+    )
+    selected = selected.sort_values("date")
     if selected.empty:
         raise HTTPException(status_code=404, detail="No forecast found for this item and store.")
     protection_days = request.lead_time_days + request.review_period_days
