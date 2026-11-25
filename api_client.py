@@ -10,8 +10,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_API_URL = os.getenv("FORECASTER_API_URL", "http://127.0.0.1:8000")
-DEFAULT_TIMEOUT = float(os.getenv("FORECASTER_API_TIMEOUT", "10.0"))
+DEFAULT_API_URL = os.getenv(
+    "FORECASTER_API_URL",
+    "https://store-level-demand-forcaster.onrender.com",
+)
+# Render free tier can take 30-60s to wake from sleep — use a generous timeout
+DEFAULT_TIMEOUT = float(os.getenv("FORECASTER_API_TIMEOUT", "60.0"))
 
 
 class ForecasterApiClient:
@@ -24,8 +28,9 @@ class ForecasterApiClient:
     def _client(self) -> httpx.Client:
         return httpx.Client(base_url=self.base_url, timeout=self.timeout)
 
-    def is_healthy(self, timeout: float = 0.5) -> bool:
-        """Check if FastAPI backend is responding with a short timeout."""
+    def is_healthy(self, timeout: float = 15.0) -> bool:
+        """Check if FastAPI backend is responding.
+        Default 15 s — generous enough for Render free-tier cold-start."""
         try:
             with httpx.Client(base_url=self.base_url, timeout=timeout) as client:
                 response = client.get("/health")

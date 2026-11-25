@@ -602,7 +602,7 @@ with st.sidebar:
     st.divider()
     api_online = api_client.default_client.is_healthy()
     if api_online:
-        st.caption("🟢 **Backend API**: Connected (`http://127.0.0.1:8000`)")
+        st.caption("🟢 **Backend API**: Connected (`https://store-level-demand-forcaster.onrender.com`)")
     else:
         st.caption("🟡 **Backend API**: Offline (Local mode)")
 
