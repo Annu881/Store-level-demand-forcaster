@@ -1,18 +1,63 @@
+# 📦 Store-Level Demand Forecaster
+
+[![Streamlit App](https://img.shields.io/badge/Frontend-Streamlit%20Cloud-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://store-level-demand-forcaster-mkcbsdpydx7cvpfld35jxg.streamlit.app)
+[![FastAPI Backend](https://img.shields.io/badge/Backend-Render%20FastAPI-46E3B7?style=for-the-badge&logo=render&logoColor=black)](https://store-level-demand-forcaster.onrender.com/docs)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![XGBoost](https://img.shields.io/badge/Model-XGBoost-189FDD?style=for-the-badge)](https://xgboost.readthedocs.io/)
+
+An end-to-end retail demand forecasting and inventory replenishment system built on the **M5 Forecasting** dataset (30,490 item/store series). It pairs a **recursive XGBoost** forecasting pipeline, **FastAPI** serving layer, **data-quality & rolling backtest** suite, and an interactive **Streamlit** dashboard.
+
 ---
-title: Store Level Demand Forecaster
-emoji: 📦
-colorFrom: blue
-colorTo: indigo
-sdk: streamlit
-app_file: app.py
-pinned: false
+
+## 🌐 Live Deployments
+
+| Service | Platform | Link | Notes |
+| --- | --- | --- | --- |
+| **Interactive Dashboard** | Streamlit Community Cloud | [Open Live App](https://store-level-demand-forcaster-mkcbsdpydx7cvpfld35jxg.streamlit.app) | Upload sales CSVs, explore forecasts & run replenishment simulations |
+| **Backend REST API** | Render (Free Tier) | [https://store-level-demand-forcaster.onrender.com](https://store-level-demand-forcaster.onrender.com/health) | FastAPI + PyArrow pushdown serving *(first request after idle may take ~30–60s to wake)* |
+| **Swagger / OpenAPI Docs** | Render | [Open `/docs`](https://store-level-demand-forcaster.onrender.com/docs) | Interactive API explorer — test endpoints directly in browser |
+
+### ⚡ Try the Live API Right Now
+
+Click any GET endpoint below to inspect live JSON responses:
+
+- [Health Check (`/health`)](https://store-level-demand-forcaster.onrender.com/health)
+- [Model Metadata (`/model`)](https://store-level-demand-forcaster.onrender.com/model)
+- [Rolling Backtest Metrics (`/metrics`)](https://store-level-demand-forcaster.onrender.com/metrics)
+- [Sample 5-Day Forecast (`/forecasts?store_id=CA_1&item_id=FOODS_1_001&limit=5`)](https://store-level-demand-forcaster.onrender.com/forecasts?store_id=CA_1&item_id=FOODS_1_001&limit=5)
+- [Category Segment Metrics (`/analytics/segments?by=category`)](https://store-level-demand-forcaster.onrender.com/analytics/segments?by=category)
+- [Sample Residuals (`/residuals?store_id=CA_1&item_id=FOODS_1_001&limit=3`)](https://store-level-demand-forcaster.onrender.com/residuals?store_id=CA_1&item_id=FOODS_1_001&limit=3)
+
+<details>
+<summary>🧪 <b>Test <code>POST /replenishment</code> via cURL</b> (click to expand)</summary>
+
+```bash
+curl -X POST "https://store-level-demand-forcaster.onrender.com/replenishment" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "store_id": "CA_1",
+    "item_id": "FOODS_1_001",
+    "lead_time_days": 7,
+    "on_hand": 10
+  }'
+```
+
+</details>
+
 ---
 
-# Store-Level Demand Forecaster
+## 🧭 Quick Navigation
 
-This project explores and forecasts daily retail unit sales for item/store series using the M5 Forecasting dataset. It includes notebook-based experiments and a recursive XGBoost forecast, plus a separate horizon-aware direct XGBoost candidate, data-quality checks, a FastAPI service, and a Streamlit dashboard.
+- [Live Deployments](#-live-deployments)
+- [Project Files](#-project-files)
+- [Quick Start (Local)](#-quick-start-run-the-existing-frontend)
+- [Model Comparison & Evaluation](#-model-comparison-and-selection)
+- [Interactive Dashboard Guide](#-interactive-dashboard)
+- [Direct Forecasting & Data Quality](#-prd-workflow-additions)
 
-## Project files
+---
+
+## 📁 Project files
 
 ```text
 .
@@ -37,7 +82,7 @@ This project explores and forecasts daily retail unit sales for item/store serie
 
 The M5 competition's raw sales and price data and large engineered feature tables are not stored in Git. Download `sales_train_evaluation.csv`, `calendar.csv`, and `sell_prices.csv` from the [Kaggle M5 Forecasting Accuracy competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy/data) and place them in `data/raw/` to rerun feature preparation or model training. The small calendar file and the saved forecast outputs used by the dashboard are included.
 
-## Quick start: run the existing frontend
+## 🚀 Quick start: run the existing frontend
 
 Open PowerShell in the project folder (the inner `Store-level-demand-forcaster` directory):
 
@@ -115,7 +160,7 @@ python -m jupyter notebook
 
 Open `EDA.ipynb` first, then `model.ipynb`. Run the notebooks with the project root as the working directory so their relative data and model paths resolve correctly. Feature preparation and XGBoost training are separate from launching the frontend and may require substantial time, memory, and disk space. Do not select **Run All** simply to view existing forecasts.
 
-## Model comparison and selection
+## 📊 Model comparison and selection
 
 The validation comparison below reports MAE for both normal validation (features are built from the observed history) and recursive validation (each prediction is fed back into the history for the next forecast day). Lower MAE is better.
 
@@ -178,7 +223,7 @@ XGBoost has slightly lower MAE and WAPE in all three folds, while the baseline h
 
 The generated future forecast contains 853,720 predictions: 30,490 series for each day from `d_1942` through `d_1969`. Predictions are non-negative and complete in the saved Parquet file. Since actual sales for those dates are unavailable in the supplied data, this forecast is not an accuracy evaluation.
 
-## Interactive dashboard
+## 🖥️ Interactive dashboard
 
 The Streamlit dashboard lets users upload recent sales, view uploaded actuals separately from future predictions, and see the model version, training-date provenance, forecast range, and source data. The old 2016 M5 future projection is not offered as a current forecast. Past model evaluation remains under **Past accuracy**.
 
@@ -224,7 +269,7 @@ The example rows illustrate the required format only; use actual sales values in
 
 Training-job status, uploaded sales history, generated forecast files, and versioned model artifacts are local and intentionally excluded from Git. Source and workflow tests can be run with `python -m unittest discover -s tests -v`.
 
-## PRD workflow additions
+## 🔬 PRD workflow additions
 
 The existing recursive XGBoost model is retained. The saved comparison reports recursive MAE of 1.1113 for XGBoost, 1.1453 for the two-stage candidate, and 1.1669 for LightGBM; two-stage had the best normal-validation MAE. XGBoost was selected for the tested recursive forecast design, not because it is universally better. The comparison does not establish that direct XGBoost beats direct LightGBM. See [MODEL_CARD.md](./MODEL_CARD.md) for intended use and limitations.
 
