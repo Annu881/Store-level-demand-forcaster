@@ -1,3 +1,13 @@
+---
+title: Store Level Demand Forecaster
+emoji: 📦
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+app_file: app.py
+pinned: false
+---
+
 # Store-Level Demand Forecaster
 
 This project explores and forecasts daily retail unit sales for item/store series using the M5 Forecasting dataset. It includes notebook-based experiments and a recursive XGBoost forecast, plus a separate horizon-aware direct XGBoost candidate, data-quality checks, a FastAPI service, and a Streamlit dashboard.
